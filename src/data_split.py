@@ -38,7 +38,6 @@ def load_fold_patch_map(metadata_path):
         patch_id = feat["properties"]["ID_PATCH"]
         fold_to_patches.setdefault(fold, []).append(patch_id)
 
-    print(fold_to_patches)
     return fold_to_patches
 
 
@@ -88,3 +87,7 @@ def split_dataset():
     print(f"Val:   {len(val_ids)} patches (fold {VAL_FOLDS})")
     print(f"Test:  {len(test_ids)} patches (fold {TEST_FOLDS})")
     print(f"\nSaved to {OUT_DIR}/train_patch_ids.txt, val_patch_ids.txt, test_patch_ids.txt")
+
+
+if __name__ == "__main__":
+    split_dataset()

@@ -233,19 +233,17 @@ def process_all_patches(s2_dir, class_dir, patch_dates, out_dir):
         feat_df.to_parquet(out_path, index=False)
 
 
-# ---------------------------------------------------------------
-# Usage:
+if __name__ == "__main__":
+    DATA_PATH = '/Users/nithya/Desktop/Personal/solafume/Agri-Assignment_01/PASTIS_subset/'
+    metadata_path = os.path.join(DATA_PATH, 'metadata.geojson')
+    s2_folder_path = os.path.join(DATA_PATH, 'DATA_S2')
+    anno_folder_path = os.path.join(DATA_PATH, 'ANNOTATIONS')
 
-DATA_PATH = '/Users/nithya/Desktop/Personal/solafume/Agri-Assignment_01/PASTIS_subset/'
-metadata_path = os.path.join(DATA_PATH, 'metadata.geojson')
-s2_folder_path = os.path.join(DATA_PATH, 'DATA_S2')
-anno_folder_path = os.path.join(DATA_PATH, 'ANNOTATIONS')
+    patch_dates = load_patch_dates(metadata_path)
 
-patch_dates = load_patch_dates(metadata_path)
-
-process_all_patches(
-    s2_dir=s2_folder_path,
-    class_dir=anno_folder_path,
-    patch_dates=patch_dates,   # your existing dict
-    out_dir="../outputs/processed_data",
-)
+    process_all_patches(
+        s2_dir=s2_folder_path,
+        class_dir=anno_folder_path,
+        patch_dates=patch_dates,   # your existing dict
+        out_dir="../outputs/processed_data",
+    )
