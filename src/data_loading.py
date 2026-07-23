@@ -80,7 +80,7 @@ def prepare_split(df, patch_ids, feature_cols, label_col):
 
     X = split_df[feature_cols].to_numpy(dtype=np.float32)
     y = split_df[label_col].to_numpy()
-    groups = split_df["patch_id"].to_numpy()  # kept in case you need grouped CV later
+    groups = split_df["patch_id"].to_numpy()  # for grouped CV later
 
     return X, y, groups
 
