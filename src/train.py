@@ -12,6 +12,7 @@ import numpy as np
 import joblib
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from sklearn.model_selection import RandomizedSearchCV, StratifiedGroupKFold, cross_val_predict
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.class_weight import compute_sample_weight
@@ -88,7 +89,140 @@ def plot_confusion_matrix(cm, class_names, title, out_path, normalize=True):
     print(f"Saved confusion matrix heatmap to {out_path}")
 
 
-def main():
+def tune_rf(X_train, y_train_enc, groups, n_iter=20, cv_splits=3):
+    """Randomized hyperparameter search for RF using patch-grouped CV, so no
+    patch's pixels ever span both the search-train and search-val side of a
+    fold (same leakage concern as the main train/val/test split)."""
+    param_dist = {
+        "n_estimators": [100, 200, 300, 400],
+        "max_depth": [None, 10, 20, 30, 40],
+        "min_samples_leaf": [1, 2, 5, 10],
+        "max_features": ["sqrt", "log2", 0.3, 0.5],
+    }
+
+    base_model = RandomForestClassifier(
+        n_jobs=1,  # avoid oversubscribing cores: search itself uses n_jobs=-1
+        class_weight="balanced",
+        random_state=RANDOM_STATE,
+    )
+
+    sgkf = StratifiedGroupKFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
+
+    search = RandomizedSearchCV(
+        base_model,
+        param_distributions=param_dist,
+        n_iter=n_iter,
+        scoring="f1_macro",
+        cv=sgkf,
+        n_jobs=-1,
+        random_state=RANDOM_STATE,
+        verbose=2,
+    )
+    start = time.time()
+    search.fit(X_train, y_train_enc, groups=groups)
+    print(f"RF search took {time.time() - start:.1f}s")
+    print(f"Best RF params: {search.best_params_}")
+    print(f"Best RF CV macro F1: {search.best_score_:.4f}")
+
+    return search.best_estimator_
+
+
+def tune_xgb(X_train, y_train_enc, groups, sample_weights, n_classes, n_iter=20, cv_splits=3):
+    param_dist = {
+        "n_estimators": [100, 200, 300, 400],
+        "max_depth": [3, 4, 6, 8, 10],
+        "learning_rate": [0.01, 0.03, 0.05, 0.1, 0.2],
+        "subsample": [0.6, 0.8, 1.0],
+        "colsample_bytree": [0.6, 0.8, 1.0],
+    }
+
+    base_model = xgb.XGBClassifier(
+        objective="multi:softmax",
+        num_class=n_classes,
+        n_jobs=1,  # avoid oversubscribing cores: search itself uses n_jobs=-1
+        random_state=RANDOM_STATE,
+        eval_metric="mlogloss",
+    )
+
+    sgkf = StratifiedGroupKFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
+
+    search = RandomizedSearchCV(
+        base_model,
+        param_distributions=param_dist,
+        n_iter=n_iter,
+        scoring="f1_macro",
+        cv=sgkf,
+        n_jobs=-1,
+        random_state=RANDOM_STATE,
+        verbose=2,
+    )
+
+    start = time.time()
+    # sample_weight is sliced automatically per-fold to match each split's indices
+    search.fit(X_train, y_train_enc, groups=groups, sample_weight=sample_weights)
+    print(f"XGBoost search took {time.time() - start:.1f}s")
+    print(f"Best XGBoost params: {search.best_params_}")
+    print(f"Best XGBoost CV macro F1: {search.best_score_:.4f}")
+
+    return search.best_estimator_
+
+
+def cross_validated_evaluate(model, X, y_encoded, groups, label_encoder,
+                              model_name, sample_weight=None, cv_splits=5):
+    """Evaluate a (already-tuned) model via out-of-fold predictions across
+    ALL provided data, using StratifiedGroupKFold. Every patch is used as
+    validation exactly once across the rotation, so the aggregated report
+    covers every class present anywhere in this data -- avoiding the
+    "class missing from a single fixed val fold" artifact.
+
+    Note: this evaluates the *fixed hyperparameters* of `model` (cloned and
+    refit per fold internally by cross_val_predict) -- it does not re-tune.
+    """
+    sgkf = StratifiedGroupKFold(n_splits=cv_splits, shuffle=True, random_state=RANDOM_STATE)
+
+    fit_params = {}
+    if sample_weight is not None:
+        fit_params["sample_weight"] = sample_weight
+
+    print(f"\nRunning {cv_splits}-fold cross_val_predict for {model_name}...")
+    start = time.time()
+    try:
+        # newer sklearn (metadata routing): 'params'
+        y_pred_oof = cross_val_predict(
+            model, X, y_encoded, groups=groups, cv=sgkf, n_jobs=-1,
+            params=fit_params if fit_params else None,
+        )
+    except TypeError:
+        # older sklearn: 'fit_params'
+        y_pred_oof = cross_val_predict(
+            model, X, y_encoded, groups=groups, cv=sgkf, n_jobs=-1,
+            fit_params=fit_params if fit_params else None,
+        )
+    print(f"{model_name} cross_val_predict took {time.time() - start:.1f}s")
+
+    all_labels = list(range(len(label_encoder.classes_)))
+    macro_f1 = f1_score(y_encoded, y_pred_oof, average="macro")
+    print(f"\n=== {model_name} - Aggregated {cv_splits}-fold CV results ===")
+    print(f"Macro F1: {macro_f1:.4f}")
+    print("\nPer-class report:")
+    print(classification_report(
+        y_encoded, y_pred_oof,
+        labels=all_labels,
+        target_names=[str(c) for c in label_encoder.classes_],
+        zero_division=0,
+    ))
+
+    cm = confusion_matrix(y_encoded, y_pred_oof, labels=all_labels)
+    plot_confusion_matrix(
+        cm, label_encoder.classes_,
+        title=f"{model_name} {cv_splits}-Fold CV Confusion Matrix",
+        out_path=f"{model_name.lower()}_cv_confusion_matrix.png",
+    )
+
+    return macro_f1, cm
+
+
+def main(run_xgb=False):
     data = load_train_val_test()
     X_train, y_train, g_train = data["train"]
     X_val, y_val, g_val = data["val"]
@@ -110,28 +244,11 @@ def main():
     # Random Forest
     # =================================================================
     print("\n" + "=" * 60)
-    print("Training Random Forest...")
+    print("Tuning Random Forest (GroupKFold randomized search)...")
     print("=" * 60)
 
-    N_ESTIMATORS = 300
-    BATCH_SIZE = 25  # trees added per iteration -- keeps warm_start overhead low
-
-    rf = RandomForestClassifier(
-        n_estimators=0,
-        max_depth=None,
-        n_jobs=-1,
-        class_weight="balanced",
-        random_state=RANDOM_STATE,
-        warm_start=True,
-        verbose=0,
-    )
-
-    start = time.time()
-    n_batches = N_ESTIMATORS // BATCH_SIZE
-    for i in tqdm(range(n_batches), desc="RF training"):
-        rf.n_estimators = (i + 1) * BATCH_SIZE
-        rf.fit(X_train, y_train_enc)
-    print(f"RF training took {time.time() - start:.1f}s")
+    rf = tune_rf(X_train, y_train_enc, g_train, n_iter=20, cv_splits=3)
+    rf.n_jobs = -1  # restore full parallelism for the final fitted estimator
 
     rf_val_f1, rf_val_cm = evaluate(rf, X_val, y_val_enc, label_encoder, "RF - Validation")
     plot_confusion_matrix(
@@ -140,52 +257,63 @@ def main():
         out_path="../outputs/figures/rf_val_confusion_matrix.png",
     )
 
+    # ---------------------------------------------------------------
+    # Aggregate 5-fold CV evaluation over train+val combined ("dev" set).
+    # Every dev patch is used as validation exactly once across the 5
+    # rotations, so classes missing from a single fixed val fold (like
+    # classes 8/13/16/18 ) still get evaluated here. Test stays untouched.
+    # ---------------------------------------------------------------
+    X_dev = np.concatenate([X_train, X_val])
+    y_dev_enc = np.concatenate([y_train_enc, y_val_enc])
+    g_dev = np.concatenate([g_train, g_val])
+
+    rf_cv_f1, rf_cv_cm = cross_validated_evaluate(
+        rf, X_dev, y_dev_enc, g_dev, label_encoder,
+        model_name="RF", cv_splits=5,
+    )
+
     joblib.dump(rf, "../outputs/models/rf_model.joblib")
     joblib.dump(label_encoder, "../outputs/models/label_encoder.joblib")
 
     # =================================================================
     # XGBoost
     # =================================================================
-    print("\n" + "=" * 60)
-    print("Training XGBoost...")
-    print("=" * 60)
+    if run_xgb:
+        sample_weights = compute_sample_weight(class_weight="balanced", y=y_train_enc)
 
-    sample_weights = compute_sample_weight(class_weight="balanced", y=y_train_enc)
+        print("\n" + "=" * 60)
+        print("Tuning XGBoost (GroupKFold randomized search)...")
+        print("=" * 60)
 
-    xgb_model = xgb.XGBClassifier(
-        n_estimators=300,
-        max_depth=6,
-        learning_rate=0.1,
-        objective="multi:softmax",
-        num_class=n_classes,
-        n_jobs=-1,
-        random_state=RANDOM_STATE,
-        eval_metric="mlogloss",
-    )
-    start = time.time()
-    xgb_model.fit(
-        X_train, y_train_enc,
-        sample_weight=sample_weights,
-        eval_set=[(X_val, y_val_enc)],
-        verbose=10,
-    )
-    print(f"XGBoost training took {time.time() - start:.1f}s")
+        xgb_model = tune_xgb(
+            X_train, y_train_enc, g_train, sample_weights, n_classes,
+            n_iter=20, cv_splits=3,
+        )
+        xgb_model.n_jobs = -1  # restore full parallelism for the final fitted estimator
 
-    xgb_val_f1, xgb_val_cm = evaluate(xgb_model, X_val, y_val_enc, label_encoder, "XGBoost - Validation")
-    plot_confusion_matrix(
-        xgb_val_cm, label_encoder.classes_,
-        title="XGBoost Validation Confusion Matrix",
-        out_path="../outputs/figures/xgb_val_confusion_matrix.png",
-    )
+        xgb_val_f1, xgb_val_cm = evaluate(xgb_model, X_val, y_val_enc, label_encoder, "XGBoost - Validation")
+        plot_confusion_matrix(
+            xgb_val_cm, label_encoder.classes_,
+            title="XGBoost Validation Confusion Matrix",
+            out_path="../outputs/figures/xgb_val_confusion_matrix.png",
+        )
 
-    xgb_model.save_model("../outputs/models/xgb_model.json")
+        sample_weights_dev = compute_sample_weight(class_weight="balanced", y=y_dev_enc)
+        xgb_cv_f1, xgb_cv_cm = cross_validated_evaluate(
+            xgb_model, X_dev, y_dev_enc, g_dev, label_encoder,
+            model_name="XGBoost", sample_weight=sample_weights_dev, cv_splits=5,
+        )
+
+        xgb_model.save_model("xgb_model.json")
 
     # =================================================================
     # Compare
     # =================================================================
     print("\n" + "=" * 60)
-    print(f"RF      validation macro F1: {rf_val_f1:.4f}")
-    print(f"XGBoost validation macro F1: {xgb_val_f1:.4f}")
+    print(f"RF      single-fold validation macro F1: {rf_val_f1:.4f}")
+    print(f"RF      5-fold CV (dev set)  macro F1:    {rf_cv_f1:.4f}")
+    # print(f"XGBoost single-fold validation macro F1: {xgb_val_f1:.4f}")
+    # print(f"XGBoost 5-fold CV (dev set)  macro F1:    {xgb_cv_f1:.4f}")
     print("=" * 60)
 
     # ---------------------------------------------------------------
