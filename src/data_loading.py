@@ -136,7 +136,18 @@ def report_missing(X, split_name, feature_cols):
 
 
 def load_train_val_test(parquet_dir=PARQUET_DIR, split_dir=SPLIT_DIR,
-                         feature_cols=FEATURE_COLS, label_col=LABEL_COL):
+                         feature_cols=FEATURE_COLS, label_col=LABEL_COL,
+                         imputer=None):
+    """
+    imputer: optional, a pre-fitted sklearn imputer (e.g. loaded via
+        joblib.load("imputer.joblib") from a prior training run). If given,
+        it's used as-is (via .transform only -- NOT refit) on all three
+        splits, guaranteeing the exact same imputation statistics the
+        saved model was trained/validated against, regardless of any
+        drift in the parquet files or split files since then. If None
+        (the default -- used during initial training), a new imputer is
+        fit on X_train here, as before.
+    """
     train_ids = load_patch_ids(os.path.join(split_dir, "train_patch_ids.txt"))
     val_ids = load_patch_ids(os.path.join(split_dir, "val_patch_ids.txt"))
     test_ids = load_patch_ids(os.path.join(split_dir, "test_patch_ids.txt"))
@@ -157,9 +168,15 @@ def load_train_val_test(parquet_dir=PARQUET_DIR, split_dir=SPLIT_DIR,
     report_missing(X_val, "Val", feature_cols)
     report_missing(X_test, "Test", feature_cols)
 
-    # ---- impute NaN using TRAIN statistics only, applied to all splits ----
-    imputer = SimpleImputer(strategy="median")
-    X_train = imputer.fit_transform(X_train)
+    if imputer is None:
+        # initial training: fit fresh, using TRAIN statistics only
+        imputer = SimpleImputer(strategy="median")
+        X_train = imputer.fit_transform(X_train)
+    else:
+        # reusing a previously-fitted imputer (e.g. at inference/re-eval
+        # time) -- transform only, never refit, so stats can't drift
+        print("Using pre-fitted imputer (not refitting).")
+        X_train = imputer.transform(X_train)
     X_val = imputer.transform(X_val)
     X_test = imputer.transform(X_test)
 

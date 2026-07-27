@@ -274,6 +274,7 @@ def main(run_xgb=False):
 
     joblib.dump(rf, "../outputs/models/rf_model.joblib")
     joblib.dump(label_encoder, "../outputs/models/label_encoder.joblib")
+    joblib.dump(data["imputer"], "../outputs/models/imputer.joblib")
 
     # =================================================================
     # XGBoost

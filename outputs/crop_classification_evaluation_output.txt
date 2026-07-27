@@ -1,0 +1,107 @@
+Found saved imputer at ../outputs/models/imputer.joblib -- reusing exact training-time statistics.
+Loading held-out test set (train/val also loaded internally, but only test is used here)...
+Loading full feature dataset from parquet...
+  Total rows (all patches, incl. void): 1,671,168
+
+Train: 987,951 pixels from 66 patches
+Val:   267,316 pixels from 18 patches
+Test:  271,814 pixels from 18 patches
+  Train: 147,809 rows (14.96%) have at least one NaN feature (expected -- missing months / fully cloud-masked pixels); will be median-imputed.
+  Val: 39,110 rows (14.63%) have at least one NaN feature (expected -- missing months / fully cloud-masked pixels); will be median-imputed.
+  Test: 36,693 rows (13.50%) have at least one NaN feature (expected -- missing months / fully cloud-masked pixels); will be median-imputed.
+
+Train class distribution:
+  class 0: 327,573 (33.2%)
+  class 1: 198,324 (20.1%)
+  class 3: 127,407 (12.9%)
+  class 2: 114,971 (11.6%)
+  class 15: 91,773 (9.3%)
+  class 5: 56,030 (5.7%)
+  class 4: 34,871 (3.5%)
+  class 10: 10,335 (1.0%)
+  class 14: 8,892 (0.9%)
+  class 7: 4,607 (0.5%)
+  class 18: 4,382 (0.4%)
+  class 17: 4,330 (0.4%)
+  class 6: 2,131 (0.2%)
+  class 8: 1,345 (0.1%)
+  class 12: 500 (0.1%)
+  class 11: 247 (0.0%)
+  class 13: 158 (0.0%)
+  class 16: 75 (0.0%)
+
+=== RF - Test (FINAL) results ===
+Macro F1: 0.4514
+
+Per-class report:
+              precision    recall  f1-score   support
+
+           0       0.88      0.75      0.81     96924
+           1       0.68      0.86      0.76     54359
+           2       0.89      0.94      0.91     35388
+           3       0.88      0.91      0.89     31525
+           4       0.87      0.92      0.90     11780
+           5       0.93      0.95      0.94     17328
+           6       0.00      0.00      0.00       153
+           7       0.75      0.70      0.73      2851
+           8       0.00      0.00      0.00         0
+          10       0.10      0.07      0.08      1612
+          11       0.00      0.00      0.00       306
+          12       0.00      0.00      0.00      2643
+          13       0.00      0.00      0.00         0
+          14       0.43      0.25      0.31      1778
+          15       0.79      0.92      0.85     13828
+          16       0.00      0.00      0.00         0
+          17       0.12      0.03      0.04       674
+          18       0.00      0.00      0.00       665
+
+    accuracy                           0.82    271814
+   macro avg       0.41      0.40      0.40    271814
+weighted avg       0.82      0.82      0.81    271814
+
+Saved confusion matrix heatmap to rf_test_confusion_matrix.png
+
+============================================================
+RF - Test (FINAL) - extended metrics
+============================================================
+Overall accuracy:      0.8217
+Balanced accuracy:     0.4857  (mean per-class recall)
+Cohen's kappa:         0.7774  (agreement beyond chance)
+Mean IoU (mIoU):       0.3872  (over 16/18 classes with any true or predicted support)
+
+Per-class IoU:
+  class 0: 0.6806
+  class 1: 0.6079
+  class 2: 0.8431
+  class 3: 0.8070
+  class 4: 0.8150
+  class 5: 0.8819
+  class 6: 0.0000
+  class 7: 0.5698
+  class 8: N/A (no true or predicted samples)
+  class 10: 0.0431
+  class 11: 0.0000
+  class 12: 0.0000
+  class 13: N/A (no true or predicted samples)
+  class 14: 0.1843
+  class 15: 0.7419
+  class 16: 0.0000
+  class 17: 0.0214
+  class 18: 0.0000
+
+Top confused class pairs (true -> predicted, count):
+  0 -> 1: 18,582
+  1 -> 0: 6,320
+  0 -> 3: 1,768
+  3 -> 15: 1,735
+  10 -> 2: 1,303
+  0 -> 2: 1,257
+  12 -> 1: 1,244
+  0 -> 4: 880
+  14 -> 1: 862
+  0 -> 5: 824
+
+============================================================
+RF FINAL test macro F1: 0.4514
+RF FINAL test mIoU:     0.3872
+============================================================
