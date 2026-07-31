@@ -1,18 +1,3 @@
-[source: 1]
-
-# crop-type-classification
-
-The objective of this project is to train a model to classify crop type using PASTIS as the training data. 
-
-### References:
-1. Assessing feature extraction, selection, and classification combinations for crop mapping using Sentinel-2 time series: A case study in northern Italy. Rahat Tufail , Patrizia Tassinari , Daniele Torreggiani Department of Agricultural and Food Sciences, University of Bologna, Viale Fanin 48, 40127, Bologna, Italy. 
-2. https://dibyendudeb.com/random-forest-crop-classification-sentinel-2-python/#Part_2_%E2%80%94_Feature_Engineering_for_Crop_Classification
-3. https://github.com/Surv-Lukmon/Crop-Classification
-4. Classification of Agricultural Crops with Random Forest and Support Vector Machine Algorithms Using Sentinel-2 and Landsat-8 Images Murat Güven Tuğaç1 * Fatih Fehmi Şimşek2 * Harun Torunlar1
-1 Ministry of Agriculture and Forestry, Soil, Fertilizer and Water Resources Central Research Institute, Ankara/Türkiye. 2 Ministry of Agriculture and Forestry, General Directorate of Agricultural Reform, Ankara/Türkiye
-
----
-
 # **Crop-Type Classification on PASTIS — Technical Report**
 
 ## **1. Objective & Scope**
@@ -24,7 +9,12 @@ The goal is a pixel-level crop-type classifier trained on the PASTIS Sentinel-2 
 *   `feature_engineering.py` — raw .npy patches → per-patch Parquet feature tables.
 *   `data_split.py` — reproducible patch-level train/val/test split from PASTIS folds.
 *   `data_loading.py` — load Parquet, filter, impute, assemble X/y arrays.
-*   `train.py` — tune, train, and evaluate RF/XGBoost.
+*   `train.py` — tune, train, and evaluate RF/XGBoost (validation + aggregated 5-fold CV).
+*   `recreate_model.py` — one-shot refit of the RF/label-encoder/imputer from the already-found best hyperparameters (skips the multi-hour search; used to regenerate the saved artifacts).
+*   `evaluate.py` — **final held-out test-set evaluation** of the saved tuned model, with extended metrics (accuracy, balanced accuracy, Cohen's kappa, per-class + mean IoU, top confused pairs).
+*   `visualize.py` — per-patch 4-panel prediction maps (RGB · ground truth · prediction · agreement) with auto-selection of best/worst/typical test patches.
+
+**Model artifacts & git LFS:** the fitted model is persisted to `outputs/models/rf_model.joblib` alongside its `label_encoder.joblib` and `imputer.joblib`. Because the serialized forest is a large binary (well beyond a comfortable plain-git blob), it is tracked with **Git Large File Storage** — `.gitattributes` declares `outputs/models/rf_model.joblib filter=lfs diff=lfs merge=lfs -text`, so git stores a lightweight text pointer in history and the binary payload in LFS. This keeps the repository lightweight and diffable while still versioning the trained model. `recreate_model.py` exists as the deterministic fallback path to regenerate the same artifacts from the saved best hyperparameters if the LFS object is unavailable.
 
 ---
 
@@ -105,7 +95,7 @@ Two complementary checks (OR'd together):
 
 Void filtered, Inf dropped, NaN imputed — three distinct treatments:
 *   **Inf** = genuine numerical corruption (a division that escaped the EPS guard). Rare, meaningless → rows dropped.
-*   **NaN** = expected structural missingness (a pixel with no valid acquisition in a month, or fully cloud-masked all season). Common across 120 monthly columns. Dropping every NaN row would non-randomly gut cloudier patches, so NaN is median-imputed instead.
+*   **NaN** = expected structural missingness (a pixel with no valid acquisition in a month, or fully cloud-masked all season). Common across 120 monthly columns — in the current run **~13–15% of rows carry at least one NaN feature** (train 14.96%, val 14.63%, test 13.50%). Dropping every NaN row would non-randomly gut cloudier patches, so NaN is median-imputed instead.
 *   **Void** (class 19) filtered via `~is_void`.
 
 **Leakage-safe imputation:** the median `SimpleImputer` is fit on the training split only and applied to val/test — no val/test statistics leak into imputation. The fitted imputer is returned alongside the data so inference later uses identical fill values.
@@ -139,11 +129,14 @@ The empirical comparison (§9) also does not show XGBoost decisively beating RF 
 *   **CV = StratifiedGroupKFold** grouped by patch — the same anti-leakage principle as the main split.
 *   **Core-oversubscription guard:** base estimators use `n_jobs=1` while the search uses `n_jobs=-1`; `n_jobs` is restored to `-1` on the final fitted estimator.
 
+**Selected hyperparameters (from the latest search):** `n_estimators=100`, `min_samples_leaf=10`, `max_features=0.3`, `max_depth=20`, with best in-search CV macro-F1 = **0.4588**. The randomized search over 20 candidates × 3 folds (60 fits) took ~8.8 h wall-clock (31,782 s); `recreate_model.py` hard-codes these params so the model can be rebuilt with a single fit instead of re-running the search.
+
 ### **7.4 Evaluation protocol (two-tier, with a documented rationale)**
 *   **Single fixed-fold validation** (fold 4). Fast, but has a known artifact: classes 8, 13, 16, 18 have zero support in the val fold (and 8/13/16 in test), so their rows are empty — you literally cannot measure them there.
 *   **Aggregated 5-fold CV** over the "dev" set (train+val combined) via `cross_val_predict` + `StratifiedGroupKFold`. Every dev patch serves as validation exactly once, so every class present anywhere in dev gets evaluated, curing the missing-class artifact. This re-fits the fixed tuned hyperparameters per fold (it does not re-tune).
-*   **Test set is deliberately untouched** — the code comments state test should be run only once, with the winning model, after all tuning is finalized. (No test evaluation is executed in the current script.)
-*   **Confusion matrices** are row-normalized (per-class recall), chosen for readability under imbalance.
+*   **Final held-out test evaluation** now runs *once*, in a separate `evaluate.py` (not in `train.py`), after tuning/model-selection was locked in — exactly the discipline the comments prescribe. It loads the already-saved model + encoder + imputer (reusing the exact training-time impute statistics rather than refitting), and reports overall accuracy, per-class precision/recall/F1, a row-normalized confusion matrix, **per-class + mean IoU (mIoU)**, **Cohen's kappa**, **balanced accuracy**, and the **top confused (true→predicted) class pairs**. Classes appearing in test but never in training would raise rather than be silently mishandled (a guard on the label encoder).
+*   **Confusion matrices** are row-normalized (per-class recall), chosen for readability under imbalance. Saved to `outputs/figures/` as `rf_val_confusion_matrix_v3.png`, `rf_cv_confusion_matrix_v3.png`, and `rf_test_confusion_matrix_v3.png`.
+*   **Qualitative prediction maps** (`visualize.py`) reconstruct each patch's spatial grid and render a 4-panel figure — Sentinel-2 RGB (least-cloudy acquisition) · ground truth · RF prediction · agreement map — with per-patch accuracy and macro-F1 in the title. Left to auto-select, it ranks test patches by per-patch macro-F1 and renders the best, worst, and a random-sampled spread (saved under `outputs/figures/predictions/`).
 
 ---
 
@@ -151,68 +144,87 @@ The empirical comparison (§9) also does not show XGBoost decisively beating RF 
 
 Measured non-void class distribution (1,527,081 pixels):
 
-| Class | % | Class | % |
-| :--- | :--- | :--- | :--- |
-| **0 Background** | 33.1 | **4 Winter barley** | 3.8 |
-| **1 Meadow** | 19.4 | **10 Winter triticale** | 1.0 |
-| **2 Soft winter wheat** | 13.0 | **14 Leguminous fodder** | 0.83 |
-| **3 Corn** | 12.9 | **7 Sunflower** | 0.63 |
-| **15 Soybeans** | 8.0 | **17 Mixed cereal** | 0.34 |
-| **5 Winter rapeseed** | 6.1 | **18 Sorghum / 6 Spring barley / 12 F.V.F.** | 0.33 / 0.23 / 0.21 |
-
-> 8 Grapevine 0.09 · 11 W.durum 0.05 · 13 Potatoes 0.01 · 16 Orchard 0.005
+| Class                   | %      | Class                    | %                                   |
+|:------------------------|:-------|:-------------------------|:------------------------------------|
+| **0 Background**        | 33.1   | **4 Winter barley**      | 3.8                                 |
+| **1 Meadow**            | 19.4   | **10 Winter triticale**  | 1.0                                 |
+| **2 Soft winter wheat** | 13.0   | **14 Leguminous fodder** | 0.83                                |
+| **3 Corn**              | 12.9   | **7 Sunflower**          | 0.63                                |
+| **15 Soybeans**         | 8.0    | **17 Mixed cereal**      | 0.34                                |
+| **5 Winter rapeseed**   | 6.1    | **18 Sorghum**           | 0.33                                
+| **6 Spring barley**     | 0.23   | **12 F.V.F.**            | 0.21                                |
+| **8 Grapevine**         | 0.09   | **11 W.durum**           | 0.05                                |
+| **13 Potatoes**         | 0.01   | **16 Orchard**           | 0.005                               |
 
 *   **Extreme imbalance** (>6000:1 top-to-bottom). The rarest classes are decimal-fraction slivers: Orchard = 75 pixels, Potatoes = 158, Winter durum wheat = 725, Grapevine = 1,345 across the entire dataset.
 *   **Handling in code:** RF `class_weight="balanced"`; XGB `compute_sample_weight("balanced")`; macro-F1 scoring. These raise minority recall but cannot manufacture signal from ~100 pixels concentrated in one or two patches.
 *   **Label-quality / structural caveats:**
     *   "Background" (33%) and "Meadow" (19%) are not crops — they dominate and act as attractor classes for anything ambiguous (see §9).
-    *   **Spatial concentration:** because splits are patch-level, a rare class living in one patch may be entirely in one split (exactly why 8/13/16/18 vanish from val/test) — its evaluation is fragile regardless of model quality.
+    *   **Spatial concentration:** because splits are patch-level, a rare class living in one patch may be entirely in one split — its evaluation is fragile regardless of model quality. In the current split, **Grapevine (8), Potatoes (13), and Orchard (16) fall entirely inside the training patches (zero support in the test fold)**, so the final test evaluation literally cannot score them; they are only measurable in the aggregated CV (where each is 0.00). Their whole-dataset pixel counts (75 / 158 / 1,345 for orchard / potatoes / grapevine) confirm how little there is to learn from.
     *   **Void** ~8.6% of the grid is unlabeled and correctly excluded.
     *   **Composite/ambiguous label definitions** ("Mixed cereal", "Fruits/vegetables/flowers", "Leguminous fodder") are inherently spectrally heterogeneous — noisy targets by construction.
 
 ---
 
 ## **9. Results & Interpretation**
-*(Read from the row-normalized confusion matrices; diagonal = recall.)*
+*(Recalls read from the row-normalized confusion matrices; diagonal = recall. Test numbers are from the one-time held-out `evaluate.py` run.)*
 
-### **9.1 Random Forest — 5-fold CV (the most reliable readout)**
+### **9.0 Headline numbers**
 
-**Performed well (recall):**
-*   **Winter rapeseed (5):** 0.84 — best class. Rapeseed has a uniquely bright yellow-flowering signal (high visible reflectance spike in spring) that is spectrally unmistakable.
-*   **Background (0):** 0.71, **Meadow (1):** 0.69, **Soft winter wheat (2):** 0.69 — the abundant classes with distinctive phenology.
-*   **Soybeans (15):** 0.68, **Corn (3):** 0.65 — well-sampled summer crops with strong, well-timed NDVI peaks.
-*   **Spring barley (6):** 0.53.
+| Readout | Macro-F1 | Notes |
+| :--- | :--- | :--- |
+| **Final held-out test** (`evaluate.py`) | **0.4514** | accuracy **0.8217**, balanced accuracy **0.4857**, Cohen's κ **0.7774**, **mIoU 0.3872** (over 16/18 classes with support) |
+| Single-fold validation (fold 4) | 0.4957 | overall accuracy 0.83; under-covers rare classes (8/13/16/18 empty) |
+| Aggregated 5-fold CV (dev set) | 0.4488 | most reliable per-class readout; every present class scored |
+| In-search best CV (tuning) | 0.4588 | RandomizedSearchCV selection score |
 
-**Performed poorly / collapsed:**
-*   **Grapevine (8):** 0.00, **Winter durum wheat (11):** 0.00, **Potatoes (13):** 0.00, **Orchard (16):** 0.00 — the four smallest classes are essentially never recovered.
-*   **Winter triticale (10):** 0.13, **Fruits/veg/flowers (12):** 0.02, **Mixed cereal (17):** 0.02, **Sorghum (18):** 0.03, **Leguminous fodder (14):** 0.11 — near-total failure.
-*   **Sunflower (7):** 0.27 and **Winter barley (4):** 0.49 — moderate but weak.
+The high overall accuracy (0.82) alongside a much lower macro-F1 (0.45) is the signature of severe imbalance: the model is excellent on the abundant, phenologically-distinct classes and near-useless on the rare ones, and macro-F1 / balanced accuracy / mIoU deliberately refuse to let the big classes hide that. **Cohen's κ = 0.78 confirms the accuracy is genuine agreement, not an artifact of predicting the majority class.**
 
-### **9.2 Specific confusions and their likely causes**
+### **9.1 Random Forest — where it performs (5-fold CV & test recall)**
 
-| True class | Confused with | Recall | Probable reason |
+**Performed well (recall — CV / test):**
+*   **Winter rapeseed (5):** 0.96 / 0.95 — best class. Rapeseed's uniquely bright yellow-flowering signal (visible-reflectance spike in spring) is spectrally unmistakable (test IoU 0.88, F1 0.94).
+*   **Soft winter wheat (2):** 0.91 / 0.94, **Corn (3):** 0.90 / 0.91, **Winter barley (4):** 0.88 / 0.92 — abundant, well-timed phenology (test IoU 0.84 / 0.81 / 0.82).
+*   **Soybeans (15):** 0.85 / 0.92 — well-sampled summer crop with a strong NDVI peak (test IoU 0.74).
+*   **Meadow (1):** 0.81 / 0.86, **Background (0):** 0.78 / 0.75 — the two dominant non-crop classes.
+*   **Sunflower (7):** 0.61 / 0.70 — moderate; distinctive but brief flowering (test IoU 0.57).
+
+This is a marked improvement over the earlier model version (e.g. wheat/corn/barley now 0.9+ vs. ~0.65–0.69 before, rapeseed 0.96 vs 0.84), reflecting the tuned hyperparameters and the full monthly-band feature set.
+
+**Performed poorly / collapsed (CV recall):**
+*   **Grapevine (8), Winter durum wheat (11), Potatoes (13), Orchard (16):** all 0.00 — the smallest classes are essentially never recovered (8/13/16 also have zero test support, so test can't score them at all).
+*   **Fruits/veg/flowers (12):** 0.00, **Mixed cereal (17):** 0.00, **Sorghum (18):** 0.00, **Leguminous fodder (14):** 0.32, **Winter triticale (10):** 0.45, **Spring barley (6):** 0.40 — partial-to-total failure on mid/low-support classes.
+
+### **9.2 Specific confusions and their likely causes** *(fractions from the 5-fold CV matrix)*
+
+| True class | Confused with | CV recall | Probable reason |
 | :--- | :--- | :--- | :--- |
-| **Winter triticale (10)** | Soft winter wheat (2) 0.47, Winter barley (4) 0.23 | 0.13 | Triticale is a wheat×rye hybrid — near-identical winter-cereal phenology; same sowing/harvest window, same NDVI shape. |
-| **Winter durum wheat (11)** | Soft winter wheat (2) 0.55, triticale (10) 0.16 | 0.00 | Two wheat varieties — spectrally almost the same species; only 725 px to learn from. |
-| **Sorghum (18)** | Corn (3) 0.58 | 0.03 | Both are tall C4 summer cereals with matching green-up/senescence timing. |
-| **Sunflower (7)** | Corn (3) 0.39, Soybeans (15) 0.14 | 0.27 | Overlapping summer growing season; distinctive flowering is brief and easily missed at 10-day revisit. |
-| **Mixed cereal (17)** | wheat (2) 0.25, barley (4) 0.21, spring barley (6) 0.12, rapeseed (5) 0.13 | 0.02 | Composite label — literally a mix of cereals, so it scatters into each constituent. |
-| **Leguminous fodder (14)** | Meadow (1) 0.39 | 0.11 | Grassy/leguminous forage looks like managed grassland (meadow). |
-| **Winter barley (4)** | wheat (2) 0.24 | 0.49 | Both winter cereals; barley senesces slightly earlier but timing overlaps. |
-| **Grapevine (8)** | Background (0) 0.53, wheat (2) 0.23 | 0.00 | Sparse woody rows → mixed pixels dominated by bare soil/background at 10 m; only 1,345 px. |
-| **Orchard (16)** | Background 0.43, Meadow 0.57 | 0.00 | Trees over grass/soil — pixel signal is the understory; 75 px total. |
-| **Potatoes (13)** | Background 0.47, Soybeans 0.22, Corn 0.16 | 0.00 | 158 px; no learnable signal, defaults to majority/generic classes. |
-| **Fruits/veg/flowers (12)** | Background 0.56, Meadow 0.25 | 0.02 | Heterogeneous horticulture, tiny sample. |
+| **Winter triticale (10)** | Soft winter wheat (2) 0.46 | 0.45 | Triticale is a wheat×rye hybrid — near-identical winter-cereal phenology; same sowing/harvest window, same NDVI shape. |
+| **Winter durum wheat (11)** | Soft winter wheat (2) 0.93 | 0.00 | Two wheat varieties — spectrally almost the same species; only ~725 px total. |
+| **Mixed cereal (17)** | wheat (2) 0.52, rapeseed (5) 0.18, triticale (10) 0.16 | 0.00 | Composite label — literally a mix of cereals, so it scatters into its constituents. |
+| **Spring barley (6)** | wheat (2) 0.40, Background (0) 0.11 | 0.40 | Winter/spring cereal overlap; tiny sample (test support 153, missed entirely). |
+| **Sorghum (18)** | Corn (3) 0.53, Soybeans (15) 0.30 | 0.00 | Both tall C4 summer crops with matching green-up/senescence timing. |
+| **Sunflower (7)** | Corn (3) 0.15, Soybeans (15) 0.10, Background (0) 0.10 | 0.61 | Overlapping summer season; distinctive flowering is brief and easily missed at ~10-day revisit. |
+| **Leguminous fodder (14)** | Meadow (1) 0.44, Background (0) 0.13 | 0.32 | Grassy/leguminous forage looks like managed grassland (meadow). |
+| **Grapevine (8)** | Background (0) 0.88, Meadow (1) 0.12 | 0.00 | Sparse woody rows → mixed pixels dominated by bare soil/background at 10 m; ~1,345 px. |
+| **Orchard (16)** | Meadow (1) 0.65, Background (0) 0.35 | 0.00 | Trees over grass/soil — pixel signal is the understory; 75 px total. |
+| **Potatoes (13)** | Sunflower (7) 0.51, Soybeans (15) 0.32, Corn (3) 0.10 | 0.00 | 158 px; no learnable signal, absorbed by other summer crops. |
+| **Fruits/veg/flowers (12)** | Background (0) 0.62, Corn (3) 0.12, Soybeans (15) 0.11, rapeseed (5) 0.09 | 0.00 | Heterogeneous horticulture, tiny sample. |
+
+The **largest raw-count test confusions** (`evaluate.py`, true→predicted) confirm this at scale: Background→Meadow (18,582) and Meadow→Background (6,320) dominate simply because those classes are huge; then Corn→Soybeans (1,735), Triticale→wheat (1,303), FVF→Meadow (1,244), Leguminous→Meadow (862).
 
 **Two systematic patterns emerge:**
-*   **Phenological near-twins collapse into each other** — the winter-cereal cluster (wheat / durum wheat / triticale / barley / mixed cereal) and the summer-C4 cluster (corn / sorghum) are the dominant error structure. This is a feature-separability ceiling, not just an imbalance problem: even a perfect classifier struggles when two classes share a growth calendar and canopy structure.
-*   **Rare classes leak into Background/Meadow** — when a class has too few pixels to define a decision region, balanced weighting still can't prevent it being absorbed by the two huge non-crop attractor classes.
+*   **Phenological near-twins collapse into each other** — the winter-cereal cluster (wheat / durum wheat / triticale / mixed cereal / spring barley) and the summer-C4 cluster (corn / sorghum) are the dominant *crop-vs-crop* error structure. This is a feature-separability ceiling, not just imbalance: even a perfect classifier struggles when two classes share a growth calendar and canopy structure. Durum wheat → soft wheat at 0.93 is the extreme case.
+*   **Rare classes leak into Background/Meadow** — when a class has too few pixels to define a decision region (grapevine, orchard, FVF), balanced weighting still can't stop it being absorbed by the two huge non-crop attractor classes.
 
-### **9.3 Single-fold validation vs CV**
-The RF validation matrix shows classes 8, 13, 16, 18 as empty rows (zero support) — the exact artifact the CV evaluation was built to fix. Val-fold recall is broadly consistent with CV for the common classes (e.g. rapeseed 0.83, wheat 0.72, background 0.69), confirming the CV numbers are trustworthy and the single fold merely under-covers rare classes.
+### **9.3 Single-fold validation vs CV vs test**
+The RF validation matrix shows classes 8, 13, 16, 18 as empty rows (zero support) — the exact artifact the CV evaluation was built to fix. Val-fold recall is broadly consistent with the final test for the common classes (e.g. rapeseed 0.95 val / 0.95 test, wheat 0.93 / 0.94, corn 0.91 / 0.91), and the test macro-F1 (0.4514) lands between the optimistic single-fold val (0.4957) and the conservative aggregated CV (0.4488) — i.e. the CV number was an honest, slightly-pessimistic predictor of held-out performance, confirming the evaluation design is trustworthy. Note classes 8/13/16 are unmeasurable on test (zero support), so CV remains the definitive readout for the rare classes.
 
 ### **9.4 RF vs XGBoost**
-XGBoost's validation matrix is broadly comparable: strong on rapeseed (0.83), moderate on background (0.56)/meadow (0.62)/wheat (0.58)/soybean (0.62), and it exhibits the same minority-class collapse (grapevine/durum/potatoes/orchard ≈ 0) and the same cereal↔cereal and corn↔sorghum confusions. Notably XGB shows a heavy Mixed cereal (17) → Triticale (10) = 0.84 leak. Because XGBoost does not clearly win on the classes that matter and costs more tuning complexity, RF remains the selected model.
+XGBoost remained gated off (`run_xgb=False`) for this run, so there are no fresh XGB numbers here. In earlier exploratory comparisons XGBoost was broadly comparable — strong on rapeseed, the same minority-class collapse, and the same cereal↔cereal / corn↔sorghum confusions — without a decisive win on the classes that matter, so RF is retained as the simpler operational model. XGBoost stays as an optional upgrade path rather than the default.
+
+### **9.5 Qualitative prediction maps (`visualize.py`)**
+Per-patch 4-panel figures were generated for a spread of best/worst/typical test patches (saved under `outputs/figures/predictions/`, e.g. patches 30003, 30052, 30273, 30335, 30371, 30527, 30549). They make the quantitative story visible spatially: field interiors of the well-sampled crops are predicted cleanly (large green regions in the agreement panel), while errors concentrate at field edges (mixed pixels) and on whole parcels belonging to a confusable/rare class — matching the confusion structure above rather than appearing as random salt-and-pepper noise.
 
 ---
 
@@ -260,7 +272,18 @@ XGBoost's validation matrix is broadly comparable: strong on rapeseed (0.83), mo
 7. Class-imbalance remedies beyond weighting: targeted oversampling/SMOTE for mid-tier classes, or a two-stage hierarchy (crop vs non-crop → crop family → species) matching the natural confusion structure.
 8. Try a temporal deep model (TempCNN / LSTM / Transformer, or PSE+TAE as in the PASTIS paper) that consumes the full sequence — likely the biggest single accuracy lever, and a fair benchmark against the RF baseline.
 9. Enable and complete the XGBoost path, and add post-hoc spatial smoothing (majority filter / CRF) on predicted maps to remove salt-and-pepper noise.
-10. Finally run the held-out test fold once with the chosen model to get an unbiased performance estimate, and report per-class F1 + confusion matrix (not just macro-F1).
+10. Re-split so the rare classes (grapevine/potatoes/orchard) actually appear in test, since they are currently unmeasurable there.
 11. Report calibrated confidence and consider abstaining (predict "uncertain") on high-cloud_frac or low-margin pixels rather than forcing a low-quality label.
 
-> **Bottom line:** The pipeline is methodologically sound and leakage-safe, and RF is a well-justified, appropriately simple choice. It performs well on abundant, phenologically-distinct crops (rapeseed, wheat, corn, soybean, meadow) and fails predictably on (a) rare classes with too few/too-concentrated pixels and (b) phenological near-twins (winter-cereal varieties; corn/sorghum). The largest gains will come from better cloud handling, more data for minority classes, spatial/temporal context in the features/model, and a hierarchical treatment of the confusable crop families.
+> **Bottom line:** The pipeline is methodologically sound and leakage-safe, and RF is a well-justified, appropriately simple choice. On the held-out test set it reaches **82% overall accuracy (κ = 0.78)** with **macro-F1 0.45 / mIoU 0.39** — performing strongly on abundant, phenologically-distinct crops (rapeseed, wheat, corn, barley, soybean; per-class F1 0.85–0.94) and failing predictably on (a) rare classes with too few/too-concentrated pixels and (b) phenological near-twins (winter-cereal varieties; corn/sorghum). The gap between high accuracy and modest macro-F1 is the imbalance signature, honestly surfaced rather than hidden. The largest gains will come from better cloud handling, more (and better-distributed) data for minority classes, spatial/temporal context in the features/model, and a hierarchical treatment of the confusable crop families.
+> 
+>
+> 
+### References:
+1. Assessing feature extraction, selection, and classification combinations for crop mapping using Sentinel-2 time series: A case study in northern Italy. Rahat Tufail , Patrizia Tassinari , Daniele Torreggiani Department of Agricultural and Food Sciences, University of Bologna, Viale Fanin 48, 40127, Bologna, Italy. 
+2. https://dibyendudeb.com/random-forest-crop-classification-sentinel-2-python/#Part_2_%E2%80%94_Feature_Engineering_for_Crop_Classification
+3. https://github.com/Surv-Lukmon/Crop-Classification
+4. Classification of Agricultural Crops with Random Forest and Support Vector Machine Algorithms Using Sentinel-2 and Landsat-8 Images Murat Güven Tuğaç1 * Fatih Fehmi Şimşek2 * Harun Torunlar1
+1 Ministry of Agriculture and Forestry, Soil, Fertilizer and Water Resources Central Research Institute, Ankara/Türkiye. 2 Ministry of Agriculture and Forestry, General Directorate of Agricultural Reform, Ankara/Türkiye
+
+---
